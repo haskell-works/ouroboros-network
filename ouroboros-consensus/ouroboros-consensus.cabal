@@ -61,6 +61,7 @@ library
                        Ouroboros.Consensus.HardFork.Combinator.Abstract.SingleEraBlock
                        Ouroboros.Consensus.HardFork.Combinator.AcrossEras
                        Ouroboros.Consensus.HardFork.Combinator.Basics
+                       Ouroboros.Consensus.HardFork.Combinator.Binary
                        Ouroboros.Consensus.HardFork.Combinator.Block
                        Ouroboros.Consensus.HardFork.Combinator.Compat
                        Ouroboros.Consensus.HardFork.Combinator.Condense
