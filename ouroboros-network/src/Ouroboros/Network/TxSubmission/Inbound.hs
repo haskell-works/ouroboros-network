@@ -13,7 +13,7 @@ module Ouroboros.Network.TxSubmission.Inbound (
     TxSubmissionProtocolError(..),
   ) where
 
-import           Data.Foldable (foldl')
+import           Data.Foldable (foldl', toList)
 import qualified Data.List.NonEmpty as NonEmpty
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -265,14 +265,12 @@ txSubmissionInbound _tracer maxUnacked mpReader mpWriter _version =
         -- the mempool. This prevents us from requesting their corresponding
         -- transactions again in the future.
         let st' = st {
-          requestedTxIdsInFlight = requestedTxIdsInFlight st - reqNo,
-          unacknowledgedTxIds    = unacknowledgedTxIds st <> txidsSeq,
-          availableTxids         = availableTxids st <> txidsMap
+          requestedTxIdsInFlight = requestedTxIdsInFlight st - reqNo
         }
         mpSnapshot <- atomically mempoolGetSnapshot
         continueWithStateM
           (serverIdle n)
-          (acknowledgeTxIdsInMempool st' mpSnapshot)
+          (acknowledgeTxIdsInMempool st' txidsSeq txidsMap mpSnapshot)
 
       CollectTxs txids txs -> do
         -- To start with we have to verify that the txs they have sent us do
@@ -321,10 +319,16 @@ txSubmissionInbound _tracer maxUnacked mpReader mpWriter _version =
             bufferedTxs'' = foldl' (flip Map.delete)
                                    bufferedTxs' acknowledgedTxIds
 
-        _ <- mempoolAddTxs txsReady
+        _writtenTxids <- mempoolAddTxs txsReady
+
+        -- If we are acknowleding transactions that are still in unacknowledgedTxIds'
+        -- we need to re-add them so that we also can acknowledge them again later.
+        -- This will happen incase of duplicate txids within the same window.
+        let live =  filter (`elem` unacknowledgedTxIds') $ toList acknowledgedTxIds
+            !bufferedTxs''' = bufferedTxs'' <> (Map.fromList (zip  live (repeat Nothing)))
 
         continueWithStateM (serverIdle n) st {
-          bufferedTxs         = bufferedTxs'',
+          bufferedTxs         = bufferedTxs''',
           unacknowledgedTxIds = unacknowledgedTxIds',
           numTxsToAcknowledge = numTxsToAcknowledge st
                               + fromIntegral (Seq.length acknowledgedTxIds)
@@ -338,25 +342,36 @@ txSubmissionInbound _tracer maxUnacked mpReader mpWriter _version =
     -- mempool.
     --
     acknowledgeTxIdsInMempool :: ServerState txid tx
+                              -> (StrictSeq txid)
+                              -> (Map txid TxSizeInBytes)
                               -> MempoolSnapshot txid tx idx
                               -> ServerState txid tx
-    acknowledgeTxIdsInMempool st MempoolSnapshot{mempoolHasTx} =
+    acknowledgeTxIdsInMempool st txidsSeq _ _ | Seq.null txidsSeq  = st
+    acknowledgeTxIdsInMempool st txidsSeq txidsMap MempoolSnapshot{mempoolHasTx} =
         -- Return the next 'ServerState'
         st {
           availableTxids      = availableTxids',
           bufferedTxs         = bufferedTxs'',
-          unacknowledgedTxIds = unacknowledgedTxIds',
+          unacknowledgedTxIds = unacknowledgedTxIds'',
           numTxsToAcknowledge = numTxsToAcknowledge st
                               + fromIntegral (Seq.length acknowledgedTxIds)
         }
       where
-        -- Divide the available txs in two: those that are already in the
-        -- mempool and those that are not. We'll request some txs from the
+
+        (ignoredTxids, availableTxidsMp) =
+              Map.partitionWithKey
+                (\txid _ -> mempoolHasTx txid)
+                txidsMap
+
+        (_ignoredTxidsU, availableTxidsU) =
+              Map.partitionWithKey
+                (\txid _ -> elem txid (unacknowledgedTxIds st))
+                txidsMap
+
+        -- Divide the new txids in two: those that are already in the
+        -- mempool or in flight and those that are not. We'll request some txs from the
         -- latter.
-        (ignoredTxids, availableTxids') =
-          Map.partitionWithKey
-            (\txid _ -> mempoolHasTx txid)
-            (availableTxids st)
+        availableTxids' = availableTxids st <> Map.intersection availableTxidsMp availableTxidsU
 
         -- The txs that we intentionally don't request, because they are
         -- already in the mempool, need to be acknowledged.
@@ -367,17 +382,24 @@ txSubmissionInbound _tracer maxUnacked mpReader mpWriter _version =
                        bufferedTxs st
                     <> Map.map (const Nothing) ignoredTxids
 
+
+        unacknowledgedTxIds' = unacknowledgedTxIds st <> txidsSeq
+
         -- Check if having decided not to request more txs we can now
         -- confirm any txids (in strict order in the unacknowledgedTxIds
         -- sequence). This is used in the 'numTxsToAcknowledge' below
         -- which will then be used next time we SendMsgRequestTxIds.
         --
-        (acknowledgedTxIds, unacknowledgedTxIds') =
-          Seq.spanl (`Map.member` bufferedTxs') (unacknowledgedTxIds st)
+        (acknowledgedTxIds, unacknowledgedTxIds'') =
+          Seq.spanl (`Map.member` bufferedTxs') unacknowledgedTxIds'
 
-        -- If so we can remove acknowledged txs from our buffer
-        --
-        bufferedTxs'' = foldl' (flip Map.delete)
+
+        -- If so we can remove acknowledged txs from our buffer provided that they
+        -- are not still in unacknowledgedTxIds''. This happens incase of duplicate
+        -- txids.
+        bufferedTxs'' = foldl' (\m txid -> if elem txid unacknowledgedTxIds''
+                                              then m
+                                              else Map.delete txid m)
                                 bufferedTxs' acknowledgedTxIds
 
     serverReqTxs :: forall (n :: N).
