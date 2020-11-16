@@ -20,11 +20,16 @@ module Ouroboros.Network.Diffusion
 
 import qualified Control.Concurrent.Async as Async
 import           Control.Exception
+import           Control.Monad (forever)
+import           Control.Monad.Class.MonadSTM
+import           Control.Monad.Class.MonadTimer
 import           Control.Tracer (Tracer)
 import           Data.Functor (void)
+import           Data.List.NonEmpty (NonEmpty (..))
 import           Data.Maybe (maybeToList)
 import           Data.Void (Void)
 import           Data.ByteString.Lazy (ByteString)
+import           System.Random
 
 import           Network.Mux (MuxTrace (..), WithMuxBearer (..))
 import           Network.Socket (AddrInfo, SockAddr)
@@ -55,6 +60,7 @@ import           Ouroboros.Network.Socket ( ConnectionId (..)
                                           , cleanNetworkMutableState
                                           , NetworkServerTracers (..)
                                           )
+import           Ouroboros.Network.PeerSelection.LedgerPeers (PoolStake, RelayAddress, runLedgerPeers, TraceLedgerPeers)
 import           Ouroboros.Network.Subscription.Ip
 import           Ouroboros.Network.Subscription.Dns
 import           Ouroboros.Network.Subscription.Worker (LocalAddresses (..))
@@ -79,6 +85,7 @@ data DiffusionTracers = DiffusionTracers {
     , dtLocalErrorPolicyTracer :: Tracer IO (WithAddr LocalAddress ErrorPolicyTrace)
     , dtAcceptPolicyTracer     :: Tracer IO AcceptConnectionsPolicyTrace
       -- ^ Trace rate limiting of accepted connections
+    , dtLedgerPeersTracer      :: Tracer IO TraceLedgerPeers
     }
 
 
@@ -99,6 +106,7 @@ data DiffusionArguments = DiffusionArguments {
       -- ^ parameters for limiting number of accepted connections
     , daDiffusionMode :: DiffusionMode
       -- ^ run in initiator only mode
+
     }
 
 data DiffusionApplications ntnAddr ntcAddr ntnVersionData ntcVersionData m = DiffusionApplications {
@@ -129,6 +137,9 @@ data DiffusionApplications ntnAddr ntcAddr ntnVersionData ntcVersionData m = Dif
 
     , daErrorPolicies :: ErrorPolicies
       -- ^ error policies
+
+    , daGetPeersFromCurrentLedger :: STM IO [(PoolStake, NonEmpty RelayAddress)]
+       -- ^ Peers from chain interface
     }
 
 data DiffusionFailure = UnsupportedLocalSocketType
@@ -154,7 +165,9 @@ runDataDiffusion tracers
                                     , daAcceptedConnectionsLimit
                                     , daDiffusionMode
                                     }
-                 applications@DiffusionApplications { daErrorPolicies } =
+                 applications@DiffusionApplications { daErrorPolicies
+                                                    , daGetPeersFromCurrentLedger
+                                                    } =
     withIOManager $ \iocp -> do
 
     let -- snocket for remote communication.
@@ -169,6 +182,8 @@ runDataDiffusion tracers
 
     lias <- getInitiatorLocalAddresses snocket
 
+    ledgerPeersRng <- newStdGen
+
     void $
       -- clean state thread
       Async.withAsync (cleanNetworkMutableState networkState) $ \cleanNetworkStateThread ->
@@ -180,7 +195,7 @@ runDataDiffusion tracers
           Async.withAsync (runLocalServer iocp networkLocalState) $ \localServerThread ->
 
               -- fork ip subscription
-              Async.withAsync (runIpSubscriptionWorker snocket networkState lias) $ \ipSubThread ->
+              Async.withAsync (runIpSubscriptionWorker snocket networkState lias daIpProducers) $ \ipSubThread ->
 
                 -- fork dns subscriptions
                 withAsyncs (runDnsSubscriptionWorker snocket networkState lias <$> daDnsProducers) $ \dnsSubThreads ->
@@ -188,13 +203,20 @@ runDataDiffusion tracers
                   case daDiffusionMode of
                     InitiatorAndResponderDiffusionMode ->
                       -- fork servers for remote peers
-                      withAsyncs (runServer snocket networkState . fmap Socket.addrAddress <$> addresses) $ \serverThreads -> do
-                        void $ Async.waitAnyCancel $
-                            [ cleanNetworkStateThread
-                            , cleanLocalNetworkStateThread
-                            , localServerThread
-                            , ipSubThread
-                            ] ++ dnsSubThreads ++ serverThreads
+                      withAsyncs (runServer snocket networkState . fmap Socket.addrAddress <$> addresses) $ \serverThreads ->
+                        Async.withAsync (runLedgerPeers ledgerPeersRng dtLedgerPeersTracer daGetPeersFromCurrentLedger
+                                                      {- Not yet (runIpSubscriptionWorker snocket networkState lias)
+                                                      (runDnsSubscriptionWorker snocket networkState lias)) -}
+                                                      (\_ -> forever $ threadDelay 3600)
+                                                      (\_ -> forever $ threadDelay 3600))
+                                        $ \ledgerPeerThread -> do
+                          void $ Async.waitAnyCancel $
+                              [ cleanNetworkStateThread
+                              , cleanLocalNetworkStateThread
+                              , localServerThread
+                              , ipSubThread
+                              , ledgerPeerThread
+                              ] ++ dnsSubThreads ++ serverThreads
 
                     InitiatorOnlyDiffusionMode ->
                       void $ Async.waitAnyCancel $
@@ -215,6 +237,7 @@ runDataDiffusion tracers
                      , dtErrorPolicyTracer
                      , dtLocalErrorPolicyTracer
                      , dtAcceptPolicyTracer
+                     , dtLedgerPeersTracer
                      } = tracers
 
     --
@@ -368,8 +391,9 @@ runDataDiffusion tracers
     runIpSubscriptionWorker :: SocketSnocket
                             -> NetworkMutableState SockAddr
                             -> LocalAddresses SockAddr
+                            -> IPSubscriptionTarget
                             -> IO ()
-    runIpSubscriptionWorker sn networkState la = void $ NodeToNode.ipSubscriptionWorker
+    runIpSubscriptionWorker sn networkState la ipProducer = void $ NodeToNode.ipSubscriptionWorker
       sn
       (NetworkSubscriptionTracers
         dtMuxTracer
@@ -381,7 +405,7 @@ runDataDiffusion tracers
         { spLocalAddresses         = la
         , spConnectionAttemptDelay = const Nothing
         , spErrorPolicies          = remoteErrorPolicy
-        , spSubscriptionTarget     = daIpProducers
+        , spSubscriptionTarget     = ipProducer
         }
       (daInitiatorApplication applications)
 
