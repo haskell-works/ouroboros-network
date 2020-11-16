@@ -15,6 +15,7 @@
 
 module Ouroboros.Consensus.Shelley.Node (
     protocolInfoShelley
+  , protocolInfoShelleyBased
   , ProtocolParamsShelley (..)
   , ProtocolParamsAllegra (..)
   , ProtocolParamsMary (..)
@@ -55,7 +56,7 @@ import           Ouroboros.Consensus.Storage.ImmutableDB (simpleChunkInfo)
 import           Ouroboros.Consensus.Util.Assert
 import           Ouroboros.Consensus.Util.IOLike
 
-import           Cardano.Ledger.Val ((<->))
+import           Cardano.Ledger.Val (coin, inject, (<->))
 import qualified Shelley.Spec.Ledger.API as SL
 import qualified Shelley.Spec.Ledger.OCert as Absolute (KESPeriod (..))
 
@@ -190,6 +191,16 @@ protocolInfoShelley ProtocolParamsShelley {
                       , shelleyProtVer           = protVer
                       , shelleyLeaderCredentials = credentialss
                       } =
+    protocolInfoShelleyBased genesis initialNonce protVer credentialss
+
+protocolInfoShelleyBased ::
+     forall m era f. (IOLike m, ShelleyBasedEra era, Foldable f)
+  => SL.ShelleyGenesis era
+  -> SL.Nonce
+  -> SL.ProtVer
+  -> f (TPraosLeaderCredentials (EraCrypto era))
+  -> ProtocolInfo m (ShelleyBlock era)
+protocolInfoShelleyBased genesis initialNonce protVer credentialss =
     assertWithMsg (validateGenesis genesis) $
     ProtocolInfo {
         pInfoConfig       = topLevelConfig
@@ -200,7 +211,7 @@ protocolInfoShelley ProtocolParamsShelley {
     maxMajorProtVer :: MaxMajorProtVer
     maxMajorProtVer = MaxMajorProtVer $ SL.pvMajor protVer
 
-    topLevelConfig :: TopLevelConfig (ShelleyBlock (ShelleyEra c))
+    topLevelConfig :: TopLevelConfig (ShelleyBlock era)
     topLevelConfig = TopLevelConfig {
         topLevelConfigProtocol = consensusConfig
       , topLevelConfigLedger   = ledgerConfig
@@ -209,13 +220,13 @@ protocolInfoShelley ProtocolParamsShelley {
       , topLevelConfigStorage  = storageConfig
       }
 
-    consensusConfig :: ConsensusConfig (BlockProtocol (ShelleyBlock (ShelleyEra c)))
+    consensusConfig :: ConsensusConfig (BlockProtocol (ShelleyBlock era))
     consensusConfig = TPraosConfig {
         tpraosParams
       , tpraosEpochInfo = epochInfo
       }
 
-    ledgerConfig :: LedgerConfig (ShelleyBlock (ShelleyEra c))
+    ledgerConfig :: LedgerConfig (ShelleyBlock era)
     ledgerConfig = mkShelleyLedgerConfig genesis epochInfo maxMajorProtVer
 
     epochInfo :: EpochInfo Identity
@@ -224,27 +235,27 @@ protocolInfoShelley ProtocolParamsShelley {
     tpraosParams :: TPraosParams
     tpraosParams = mkTPraosParams maxMajorProtVer initialNonce genesis
 
-    blockConfig :: BlockConfig (ShelleyBlock (ShelleyEra c))
+    blockConfig :: BlockConfig (ShelleyBlock era)
     blockConfig =
         mkShelleyBlockConfig
           protVer
           genesis
           (tpraosBlockIssuerVKey <$> toList credentialss)
 
-    storageConfig :: StorageConfig (ShelleyBlock (ShelleyEra c))
+    storageConfig :: StorageConfig (ShelleyBlock era)
     storageConfig = ShelleyStorageConfig {
           shelleyStorageConfigSlotsPerKESPeriod = tpraosSlotsPerKESPeriod tpraosParams
         , shelleyStorageConfigSecurityParam     = tpraosSecurityParam     tpraosParams
         }
 
-    initLedgerState :: LedgerState (ShelleyBlock (ShelleyEra c))
+    initLedgerState :: LedgerState (ShelleyBlock era)
     initLedgerState = ShelleyLedgerState {
         shelleyLedgerTip        = Origin
       , shelleyLedgerState      = SL.chainNes initShelleyState
       , shelleyLedgerTransition = ShelleyTransitionInfo {shelleyAfterVoting = 0}
       }
 
-    initChainDepState :: TPraosState c
+    initChainDepState :: TPraosState (EraCrypto era)
     initChainDepState = TPraosState Origin $
       SL.ChainDepState {
           SL.csProtocol = SL.PrtclState
@@ -261,39 +272,40 @@ protocolInfoShelley ProtocolParamsShelley {
     initialEpochNo :: EpochNo
     initialEpochNo = 0
 
-    initialUtxo :: SL.UTxO (ShelleyEra c)
+    initialUtxo :: SL.UTxO era
     initialUtxo = SL.genesisUtxO genesis
 
-    initShelleyState :: SL.ChainState (ShelleyEra c)
+    initShelleyState :: SL.ChainState era
     initShelleyState = registerGenesisStaking $ SL.initialShelleyState
       Origin
       initialEpochNo
       initialUtxo
-      (SL.word64ToCoin (SL.sgMaxLovelaceSupply genesis) <-> SL.balance initialUtxo)
+      (coin $ inject (SL.word64ToCoin (SL.sgMaxLovelaceSupply genesis))
+          <-> SL.balance initialUtxo)
       (SL.sgGenDelegs genesis)
       (SL.sgProtocolParams genesis)
       initialNonce
 
-    initExtLedgerState :: ExtLedgerState (ShelleyBlock (ShelleyEra c))
+    initExtLedgerState :: ExtLedgerState (ShelleyBlock era)
     initExtLedgerState = ExtLedgerState {
         ledgerState = initLedgerState
       , headerState = genesisHeaderState initChainDepState
       }
 
-    -- Register the initial staking.
+    -- | Register the initial staking.
     --
     -- This function embodies a little more logic than ideal. We might want to
-    -- move it into `cardano-ledger-specs.`
+    -- move it into @cardano-ledger-specs@.
     --
     -- HERE BE DRAGONS! This function is intended to help in testing. It should
-    -- not be called with anything other than 'emptyGenesisStaking' in
+    -- not be called with anything other than 'SL.emptyGenesisStaking' in
     -- production.
-    registerGenesisStaking :: SL.ChainState (ShelleyEra c) -> SL.ChainState (ShelleyEra c)
-    registerGenesisStaking cs@(SL.ChainState {chainNes = oldChainNes} ) = cs
+    registerGenesisStaking :: SL.ChainState era -> SL.ChainState era
+    registerGenesisStaking cs@SL.ChainState {chainNes = oldChainNes} = cs
         { SL.chainNes = newChainNes }
       where
         SL.ShelleyGenesisStaking { sgsPools, sgsStake } = SL.sgStaking genesis
-        oldEpochState = SL.nesEs $ oldChainNes
+        oldEpochState = SL.nesEs oldChainNes
         oldLedgerState = SL.esLState oldEpochState
         oldDPState = SL._delegationState oldLedgerState
 
@@ -321,7 +333,7 @@ protocolInfoShelley ProtocolParamsShelley {
         -- about updating the '_delegations' field.
         --
         -- See STS DELEG for details
-        newDState :: SL.DState (ShelleyEra c)
+        newDState :: SL.DState era
         newDState = (SL._dstate oldDPState) {
           SL._rewards = Map.map (const $ SL.Coin 0)
                       . Map.mapKeys SL.KeyHashObj
@@ -331,7 +343,7 @@ protocolInfoShelley ProtocolParamsShelley {
 
         -- We consider pools as having been registered in slot 0
         -- See STS POOL for details
-        newPState :: SL.PState (ShelleyEra c)
+        newPState :: SL.PState era
         newPState = (SL._pstate oldDPState) {
           SL._pParams = sgsPools
         }
