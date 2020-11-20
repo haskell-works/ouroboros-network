@@ -27,6 +27,7 @@ import           Control.Tracer (Tracer)
 import           Data.Functor (void)
 import           Data.List.NonEmpty (NonEmpty (..))
 import           Data.Maybe (maybeToList)
+import           Data.Time (UTCTime)
 import           Data.Void (Void)
 import           Data.ByteString.Lazy (ByteString)
 import           System.Random
@@ -138,8 +139,10 @@ data DiffusionApplications ntnAddr ntcAddr ntnVersionData ntcVersionData m = Dif
     , daErrorPolicies :: ErrorPolicies
       -- ^ error policies
 
-    , daGetPeersFromCurrentLedger :: STM IO [(PoolStake, NonEmpty RelayAddress)]
+    , daGetPeersFromCurrentLedger :: STM m [(PoolStake, NonEmpty RelayAddress)]
        -- ^ Peers from chain interface
+    , daGetCurrentTipTime :: STM m UTCTime
+       -- ^ The time corresponding to the current tip of the chain
     }
 
 data DiffusionFailure = UnsupportedLocalSocketType
@@ -167,6 +170,7 @@ runDataDiffusion tracers
                                     }
                  applications@DiffusionApplications { daErrorPolicies
                                                     , daGetPeersFromCurrentLedger
+                                                    , daGetCurrentTipTime
                                                     } =
     withIOManager $ \iocp -> do
 
@@ -204,7 +208,9 @@ runDataDiffusion tracers
                     InitiatorAndResponderDiffusionMode ->
                       -- fork servers for remote peers
                       withAsyncs (runServer snocket networkState . fmap Socket.addrAddress <$> addresses) $ \serverThreads ->
-                        Async.withAsync (runLedgerPeers ledgerPeersRng dtLedgerPeersTracer daGetPeersFromCurrentLedger
+                        Async.withAsync (runLedgerPeers ledgerPeersRng dtLedgerPeersTracer
+                                                        daGetPeersFromCurrentLedger
+                                                        daGetCurrentTipTime
                                                       {- Not yet (runIpSubscriptionWorker snocket networkState lias)
                                                       (runDnsSubscriptionWorker snocket networkState lias)) -}
                                                       (\_ -> forever $ threadDelay 3600)

@@ -41,7 +41,9 @@ import           Text.Printf
 
 data TraceLedgerPeers =
       PickedPeer !RelayAddress !AckPoolStake ! PoolStake
-    | PickedPeers Word16 [RelayAddress]
+    | PickedPeers !Word16 ![RelayAddress]
+    | WaitingOnTip !UTCTime !UTCTime
+    | FetchingNewLedgerState !Int
 
 
 instance Show TraceLedgerPeers where
@@ -51,7 +53,14 @@ instance Show TraceLedgerPeers where
             (show ackStake) (fromRational ackStake :: Double)
             (show stake) (fromRational stake :: Double)
     show (PickedPeers n peers) =
-        printf "PickedPeers %d %s\n" n (show peers)
+        printf "PickedPeers %d %s" n (show peers)
+    show (WaitingOnTip tipTs useLedgerAt) =
+        printf "Waiting for tip to catch up, at %s will switch at %s"
+            (show tipTs)
+            (show useLedgerAt)
+    show (FetchingNewLedgerState cnt) =
+        printf "Fetching new ledgerstate, %d registered pools"
+            cnt
 
 
 data RelayAddress = RelayAddressDomain DomainAddress
@@ -115,37 +124,49 @@ runLedgerPeers :: forall m.
                => StdGen
                -> Tracer m TraceLedgerPeers
                -> STM m [(PoolStake, NonEmpty RelayAddress)]
+               -> STM m UTCTime
                -> (IPSubscriptionTarget -> m ())
                -> (DnsSubscriptionTarget -> m ())
                -> m ()
-runLedgerPeers inRng tracer getPeers runIP runDns =
+runLedgerPeers inRng tracer getPeers getCurrentTipTime runIP runDns =
     go inRng Nothing Map.empty
   where
 
     go rng oldTs_m peerMap = do
-        let peerListLifeTime = 900
-        !now <- getMonotonicTime
-        (!peerMap', ts_m) <-
-            if isNothing oldTs_m || diffTime (fromJust oldTs_m) now > peerListLifeTime
-               then do
-                   pl <- ackPoolStake <$> atomically getPeers
-                   !now' <- getMonotonicTime
-                   return (pl, Just now')
-               else return (peerMap, oldTs_m)
+        let peerListLifeTime = 200
+            useLedgerAt = read "2020-08-01 00:00:00 UTC"
+        tipTs <- atomically $ getCurrentTipTime
+        if tipTs < useLedgerAt
+           then do
+               -- Statically configured peers are still considered better.
+               -- Wait for the chain to catch up.
+               traceWith tracer $ WaitingOnTip tipTs useLedgerAt
+               threadDelay 30
+               go rng oldTs_m peerMap
+           else do
+               !now <- getMonotonicTime
+               (!peerMap', ts_m) <-
+                   if isNothing oldTs_m || diffTime now (fromJust oldTs_m) > peerListLifeTime
+                      then do
+                          pl <- ackPoolStake <$> atomically getPeers
+                          !now' <- getMonotonicTime
+                          traceWith tracer $ FetchingNewLedgerState $ Map.size pl
+                          return (pl, Just now')
+                      else return (peerMap, oldTs_m)
 
-        (rng', !pickedPeers) <- pickPeers rng tracer peerMap 8
-        traceWith tracer $ PickedPeers 8 pickedPeers
-        let (ipTarget, dnsTargets) = foldl' peersToSubTarget
-                                         (IPSubscriptionTarget [] 0 , []) $ nub pickedPeers
-        ipAid <- async $ runIP ipTarget
+               (rng', !pickedPeers) <- pickPeers rng tracer peerMap' 8
+               traceWith tracer $ PickedPeers 8 pickedPeers
+               let (ipTarget, dnsTargets) = foldl' peersToSubTarget
+                                                 (IPSubscriptionTarget [] 0 , []) $ nub pickedPeers
+               ipAid <- async $ runIP ipTarget
 
-        dnsAids <- sequence [async $ runDns peer | peer <- dnsTargets]
+               dnsAids <- sequence [async $ runDns peer | peer <- dnsTargets]
 
-        -- XXX let it run for 3 minutes, then repeat with a new set of random peers.
-        ttlAid <- async (threadDelay 180)
+               -- XXX let it run for 3 minutes, then repeat with a new set of random peers.
+               ttlAid <- async (threadDelay 180)
 
-        _ <- waitAnyCancel (ttlAid : ipAid : dnsAids)
-        go rng' ts_m peerMap'
+               _ <- waitAnyCancel (ttlAid : ipAid : dnsAids)
+               go rng' ts_m peerMap'
 
     peersToSubTarget :: (IPSubscriptionTarget, [DnsSubscriptionTarget])
           -> RelayAddress

@@ -21,6 +21,7 @@ module Ouroboros.Consensus.NodeKernel (
   , getMempoolReader
   , getMempoolWriter
   , getPeersFromCurrentLedger
+  , getCurrentTipTime
   ) where
 
 import           Control.Monad
@@ -31,6 +32,7 @@ import           Data.Map.Strict (Map)
 import           Data.Maybe (isJust)
 import           Data.Proxy
 import qualified Data.Text as Text
+import           Data.Time (UTCTime)
 import           Data.Word (Word32)
 import           GHC.Stack (HasCallStack)
 import           System.Random (StdGen)
@@ -53,7 +55,9 @@ import           Ouroboros.Consensus.Block hiding (blockMatchesHeader)
 import qualified Ouroboros.Consensus.Block as Block
 import           Ouroboros.Consensus.BlockchainTime
 import           Ouroboros.Consensus.Config
+import           Ouroboros.Consensus.Config.SupportsNode
 import           Ouroboros.Consensus.Forecast
+import qualified Ouroboros.Consensus.HardFork.Abstract as HF
 import           Ouroboros.Consensus.HeaderValidation
 import           Ouroboros.Consensus.Ledger.Abstract
 import           Ouroboros.Consensus.Ledger.Extended
@@ -70,6 +74,7 @@ import           Ouroboros.Consensus.Util.IOLike
 import           Ouroboros.Consensus.Util.Orphans ()
 import           Ouroboros.Consensus.Util.ResourceRegistry
 import           Ouroboros.Consensus.Util.STM
+
 
 import           Ouroboros.Consensus.Storage.ChainDB.API (ChainDB)
 import qualified Ouroboros.Consensus.Storage.ChainDB.API as ChainDB
@@ -676,3 +681,18 @@ getPeersFromCurrentLedger ::
   -> STM m [(PoolStake, NonEmpty RelayAddress)]
 getPeersFromCurrentLedger kernel =
     getPeers . ledgerState <$> ChainDB.getCurrentLedger (getChainDB kernel)
+
+-- Retrieve the time corresponding to the current tip of the chain/ledger state.
+getCurrentTipTime
+  :: ( IOLike m
+     , HF.HasHardForkHistory blk
+     , ConfigSupportsNode blk
+     , UpdateLedger blk
+     , HasCallStack
+     )
+  => TopLevelConfig blk
+  -> NodeKernel m remotePeer localPeer blk
+  -> STM m UTCTime
+getCurrentTipTime cfg kernel =
+    getTipTime cfg . ledgerState <$> ChainDB.getCurrentLedger (getChainDB kernel)
+
