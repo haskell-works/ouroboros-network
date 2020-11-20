@@ -394,7 +394,7 @@ txSubmissionInbound _tracer maxUnacked mpReader mpWriter _version =
 
 
         -- If so we can remove acknowledged txs from our buffer provided that they
-        -- are not still in unacknowledgedTxIds''. This happens incase of duplicate
+        -- are not still in unacknowledgedTxIds''. This happens in case of duplicate
         -- txids.
         bufferedTxs'' = foldl' (\m txid -> if elem txid unacknowledgedTxIds''
                                               then m
