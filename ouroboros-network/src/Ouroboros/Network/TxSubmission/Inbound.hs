@@ -342,8 +342,8 @@ txSubmissionInbound _tracer maxUnacked mpReader mpWriter _version =
     -- mempool.
     --
     acknowledgeTxIdsInMempool :: ServerState txid tx
-                              -> (StrictSeq txid)
-                              -> (Map txid TxSizeInBytes)
+                              -> StrictSeq txid
+                              -> Map txid TxSizeInBytes
                               -> MempoolSnapshot txid tx idx
                               -> ServerState txid tx
     acknowledgeTxIdsInMempool st txidsSeq _ _ | Seq.null txidsSeq  = st
