@@ -382,7 +382,6 @@ txSubmissionInbound _tracer maxUnacked mpReader mpWriter _version =
                        bufferedTxs st
                     <> Map.map (const Nothing) ignoredTxids
 
-
         unacknowledgedTxIds' = unacknowledgedTxIds st <> txidsSeq
 
         -- Check if having decided not to request more txs we can now
