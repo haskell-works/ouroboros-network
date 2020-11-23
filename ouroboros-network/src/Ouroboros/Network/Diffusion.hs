@@ -320,7 +320,12 @@ runDataDiffusion tracers
                    -> IO ()
     runLocalServer iocp networkLocalState =
       bracket
-        (
+        localServerInit
+        localServerCleanup
+        localServerBody
+      where
+        localServerInit :: IO (Socket, Snocket.Snocket IO Socket LocalAddress)
+        localServerInit =
           case daLocalAddress of
 #if defined(mingw32_HOST_OS)
                -- Windows uses named pipes so can't take advantage of existing sockets
@@ -342,10 +347,10 @@ runDataDiffusion tracers
                    sd <- Snocket.open sn (Snocket.addrFamily sn $ Snocket.localAddressFromPath addr)
                    traceWith dtDiffusionInitializationTracer $ CreatedSystemdSocketForSnocketPath addr
                    return (sd, sn)
-        )
-        (\(sd,sn) -> Snocket.close sn sd) -- We close the socket here, even if it was provided for us.
-        (\(sd,sn) -> do
-
+        localServerCleanup :: (Socket, Snocket.Snocket IO Socket LocalAddress) -> IO ()
+        localServerCleanup (sd, sn) = Snocket.close sn sd -- We close the socket here, even if it was provided for us.
+        localServerBody :: (Socket, Snocket.Snocket IO Socket LocalAddress) -> IO ()
+        localServerBody (sd, sn) = do
           case daLocalAddress of
                Left _ -> pure () -- If a socket was provided it should be ready to accept
                Right path -> do
@@ -366,7 +371,6 @@ runDataDiffusion tracers
             sd
             (daLocalResponderApplication applications)
             localErrorPolicy
-         )
 
     runServer :: SocketSnocket -> NetworkMutableState SockAddr -> Either Socket.Socket SockAddr -> IO ()
     runServer sn networkState address =
